@@ -2,9 +2,10 @@ import streamlit as st
 import pandas as pd
 import re
 from collections import Counter
+from itertools import combinations
 
 st.set_page_config(
-    page_title="Granjita Oracle IA",
+    page_title="Granjita Dixie",
     page_icon="🧠",
     layout="centered"
 )
@@ -20,9 +21,9 @@ VENTANA_CORTA = SORTEOS_POR_DIA * DIAS_VENTANA_CORTA
 VENTANA_JALES = 60
 DIAS_HISTORIADOR = 15
 VENTANA_HISTORIADOR = SORTEOS_POR_DIA * DIAS_HISTORIADOR
+DIAS_AUTO_APRENDIZAJE = 30
+DIAS_OBSERVACION = 10
 DESCARTE_ATRASO = 60
-MODO_OBSERVACION_DIAS = 5
-META_ACIERTOS = 5
 
 ANIMALITOS_DICT = {
     0: "Delfín", 1: "Carnero", 2: "Toro", 3: "Ciempiés", 4: "Alacrán",
@@ -120,10 +121,12 @@ def calcular_ritmos(df):
     return ritmos
 
 
-def agente_matematico(df):
-    """Combina ventana corta (dinámica) y larga (estable)."""
+def agente_matematico(df, pesos=None):
     if df.empty or len(df) < 30:
         return {}
+    if pesos is None:
+        pesos = {"corta": 0.25, "larga": 0.15, "atraso": 0.25, "ratio": 0.35}
+
     df_corta = df.tail(VENTANA_CORTA)
     df_larga = df.tail(VENTANA_LARGA)
     freq_corta = Counter(df_corta["numero"].tolist())
@@ -151,8 +154,8 @@ def agente_matematico(df):
         ratio = atr / r if 0 < r < 500 else 0
         ratio_n = min(ratio, 1.5) / 1.5
 
-        # Dinámico: corta pesa más, larga estabiliza
-        score = fc * 0.25 + fl * 0.15 + a_norm * 0.25 + ratio_n * 0.35
+        score = (fc * pesos["corta"] + fl * pesos["larga"] +
+                 a_norm * pesos["atraso"] + ratio_n * pesos["ratio"])
 
         if atr >= DESCARTE_ATRASO:
             score *= 0.1
@@ -161,7 +164,6 @@ def agente_matematico(df):
 
 
 def agente_transicion(df):
-    """Jales SOLO de los últimos 60 sorteos."""
     if df.empty or len(df) < 20:
         return {}
     df_rec = df.tail(VENTANA_JALES + 1)
@@ -181,7 +183,6 @@ def agente_transicion(df):
 
 
 def agente_historiador(df, hora_actual):
-    """SOLO últimos 15 días en esa hora específica."""
     if df.empty or "hora" not in df.columns or not hora_actual:
         return {}
     df_rec = df.tail(VENTANA_HISTORIADOR)
@@ -205,13 +206,11 @@ def score_combinado(s_mat, s_trans, s_hist, top_n=15):
         if num in top_trans: votes += 1
         if num in top_hist: votes += 1
 
-        # Score promedio ponderado
         sm = s_mat.get(num, 0)
         st_ = s_trans.get(num, 0)
         sh = s_hist.get(num, 0)
         base = sm * 0.45 + st_ * 0.30 + sh * 0.25
 
-        # Bonus por consenso
         if votes == 3: base *= 1.40
         elif votes == 2: base *= 1.15
         elif votes == 1: base *= 0.95
@@ -247,22 +246,11 @@ def aplicar_techo(candidatos, repes_hoy):
     return resultado
 
 
-def diversificar(top3):
-    """Si los 3 son del mismo ecosistema, reemplaza el 3ro."""
-    if len(top3) < 3:
-        return top3
-    ecos = [ecosistema_de(c["num"]) for c in top3]
-    if len(set(ecos)) == 1:
-        return top3[:2]
-    return top3
-
-
 def detectar_inestabilidad(df, n=4):
     if df.empty or len(df) < n:
         return False
     ultimos = df.tail(n)["numero"].tolist()
     ecos = [ecosistema_de(x) for x in ultimos]
-    # Solo inestable si los 4 son de ecosistemas distintos
     return len(set(ecos)) == 4
 
 
@@ -303,9 +291,14 @@ def ecosistema_probable_dia(df):
     return top[0], scores
 
 
-def calcular_recomendacion(df):
+# ═══════════════════════════════════════════════════
+# MODO SNIPER — EL EMbUDO 38 → 10 → 1
+# ═══════════════════════════════════════════════════
+def calcular_diamante(df):
+    """Embudo: de 38 → 10 candidatos → 1 diamante con puntaje 0-10."""
     if df.empty:
         return None
+
     ultima_hora = df["hora"].iloc[-1] if "hora" in df.columns else ""
     fecha_actual = df["fecha"].iloc[-1]
 
@@ -317,20 +310,106 @@ def calcular_recomendacion(df):
     repes = contar_repes_hoy(df, fecha_actual)
     cands = aplicar_techo(cands, repes)
 
-    inestable = detectar_inestabilidad(df)
-    top = cands[:5]
-    top = diversificar(top)
+    # Etapa 1: top 10 candidatos
+    top10 = cands[:10]
+    if not top10:
+        return None
 
-    if inestable:
-        top = [c for c in top if c["votes"] >= 2][:3]
-        if not top:
-            top = cands[:3]
+    # Etapa 2: análisis profundo de los 10
+    ritmos = calcular_ritmos(df)
+    total = len(df)
+    atrasos = {}
+    for num in ANIMALITOS_DICT.keys():
+        idxs = df[df["numero"] == num].index.tolist()
+        atrasos[num] = total - 1 - idxs[-1] if idxs else total
+
+    analisis_10 = []
+    for c in top10:
+        num = c["num"]
+        puntos = 0
+        razones = []
+
+        atr = atrasos.get(num, 0)
+        r = ritmos.get(num, 999)
+        ratio = atr / r if 0 < r < 500 else 0
+
+        # Criterio 1: Atraso significativo
+        if 5 <= atr <= 40:
+            puntos += 2
+            razones.append(f"atraso ideal ({atr})")
+        elif 40 < atr <= 60:
+            puntos += 1
+            razones.append(f"atraso alto ({atr})")
+
+        # Criterio 2: Ratio cerca de 1 (maduro)
+        if 0.9 <= ratio <= 1.8:
+            puntos += 2
+            razones.append(f"ratio maduro ({round(ratio,2)})")
+        elif 0.6 <= ratio < 0.9 or 1.8 < ratio <= 2.5:
+            puntos += 1
+            razones.append(f"ratio cerca ({round(ratio,2)})")
+
+        # Criterio 3: Coinciden 2+ agentes
+        if c["votes"] >= 2:
+            puntos += 2
+            razones.append(f"{c['votes']} agentes coinciden")
+
+        # Criterio 4: Ecosistema caliente
+        eco = ecosistema_de(num)
+        eco_top, _ = ecosistema_probable_dia(df)
+        if eco == eco_top:
+            puntos += 1
+            razones.append(f"{eco} dominante")
+
+        # Criterio 5: Sin repes hoy
+        if repes.get(num, 0) == 0:
+            puntos += 1
+            razones.append("no ha salido hoy")
+
+        # Criterio 6: Jale activo
+        if c["s_trans"] >= 60:
+            puntos += 1
+            razones.append("jale activo")
+
+        # Criterio 7: Historiador fuerte
+        if c["s_hist"] >= 60:
+            puntos += 1
+            razones.append("hora frecuente")
+
+        analisis_10.append({
+            "num": num,
+            "puntos": puntos,
+            "razones": razones,
+            "score_base": c["score_aj"],
+            "atraso": atr,
+            "ritmo": r,
+            "ratio": round(ratio, 2),
+            "eco": eco
+        })
+
+    analisis_10.sort(key=lambda x: (x["puntos"], x["score_base"]), reverse=True)
+    diamante = analisis_10[0]
+
+    # Clasificación
+    if diamante["puntos"] >= 8:
+        nivel = "💎 DIAMANTE PURO"
+    elif diamante["puntos"] >= 6:
+        nivel = "💎 DIAMANTE"
+    elif diamante["puntos"] >= 4:
+        nivel = "🟡 JUGADA NORMAL"
+    elif diamante["puntos"] >= 2:
+        nivel = "🔴 JUGADA DÉBIL"
+    else:
+        nivel = "⚫ NO JUGAR"
 
     return {
-        "candidatos": top[:3],
-        "inestable": inestable,
-        "ultima_hora": ultima_hora,
-        "fecha_actual": fecha_actual
+        "num": diamante["num"],
+        "puntos": diamante["puntos"],
+        "nivel": nivel,
+        "razones": diamante["razones"],
+        "top10": analisis_10,
+        "fecha": fecha_actual,
+        "hora": ultima_hora
     }
 
 
@@ -343,7 +422,8 @@ def reconstruir_dia(df, fecha_str):
     if df_antes.empty or df_dia.empty:
         return None
 
-    aciertos = 0
+    aciertos_normal = 0
+    aciertos_sniper = 0
     resultados = []
 
     for idx, row in df_dia.iterrows():
@@ -359,30 +439,51 @@ def reconstruir_dia(df, fecha_str):
         fecha_hoy_str = df_hasta["fecha"].iloc[-1] if not df_hasta.empty else ""
         repes = contar_repes_hoy(df_hasta, fecha_hoy_str)
         cands = aplicar_techo(cands, repes)
-        top3 = diversificar(cands[:5])[:3]
+        top3 = cands[:3]
 
-        acerto = any(c["num"] == num_real for c in top3)
-        if acerto:
-            aciertos += 1
+        acerto_normal = any(c["num"] == num_real for c in top3)
+        if acerto_normal:
+            aciertos_normal += 1
+
         resultados.append({
             "hora": hora,
             "real": num_real,
             "real_nombre": ANIMALITOS_DICT.get(num_real, "?"),
             "top3": [(c["num"], ANIMALITOS_DICT[c["num"]], c["votes"]) for c in top3],
-            "acerto": acerto
+            "acerto": acerto_normal
         })
+
+    # Sniper: un solo diamante por día (se calcula al final del día anterior)
+    df_antes_dia = df[df["fecha_dt"] < fecha_obj]
+    diamante_previo = None
+    if not df_antes_dia.empty:
+        # Calcular diamante usando toda la data antes del día
+        ultima_hora_prev = df_antes_dia["hora"].iloc[-1] if "hora" in df_antes_dia.columns else ""
+        s_mat_p = agente_matematico(df_antes_dia)
+        s_trans_p = agente_transicion(df_antes_dia)
+        s_hist_p = agente_historiador(df_antes_dia, ultima_hora_prev)
+        cands_p = score_combinado(s_mat_p, s_trans_p, s_hist_p)
+        if cands_p:
+            diamante_previo = cands_p[0]["num"]
+
+    if diamante_previo is not None:
+        nums_dia = df_dia["numero"].tolist()
+        if diamante_previo in nums_dia:
+            aciertos_sniper = 1
 
     return {
         "fecha": df_dia["fecha"].iloc[0],
-        "aciertos": aciertos,
+        "aciertos_normal": aciertos_normal,
+        "aciertos_sniper": aciertos_sniper,
+        "diamante": diamante_previo,
         "total": len(df_dia),
         "detalle": resultados
     }
 
 
 def main():
-    st.title("🧠 Granjita Oracle IA")
-    st.caption("Red de Agentes v2 · Ventana dinámica · Anti-pegado")
+    st.title("🧠 Granjita Dixie")
+    st.caption("Sniper · Embudo 38→10→1 · Auto-aprendizaje · Medidor honesto")
 
     if st.button("🔄 Recargar datos"):
         st.cache_data.clear()
@@ -397,6 +498,35 @@ def main():
 
     st.caption(f"📊 Data: {len(df)} sorteos · {df['fecha'].nunique()} días")
 
+    # ═══════════════════════════════════════
+    # DIAMANTE DEL DÍA
+    # ═══════════════════════════════════════
+    st.markdown("## 💎 DIAMANTE DEL DÍA (Modo Sniper)")
+    diamante = calcular_diamante(df)
+
+    if diamante:
+        st.markdown(f"## {diamante['nivel']}")
+        st.markdown(f"# {fmt_num(diamante['num'])} - {ANIMALITOS_DICT[diamante['num']]}")
+        st.markdown(f"**Puntaje: {diamante['puntos']}/10**")
+        st.markdown("**Razones:**")
+        for r in diamante["razones"]:
+            st.write(f"- {r}")
+
+        if diamante["puntos"] < 4:
+            st.warning("⚠️ Puntaje bajo. Hoy no hay jugada clara.")
+
+        with st.expander("Ver top 10 candidatos del embudo"):
+            for i, a in enumerate(diamante["top10"], 1):
+                st.write(f"**#{i} - {fmt_num(a['num'])} {ANIMALITOS_DICT[a['num']]}** — {a['puntos']}/10 pts")
+                st.caption(f"Atraso {a['atraso']} · Ratio {a['ratio']} · {a['eco']}")
+    else:
+        st.warning("Sin datos suficientes para calcular el diamante.")
+
+    st.markdown("---")
+
+    # ═══════════════════════════════════════
+    # ECOSISTEMA
+    # ═══════════════════════════════════════
     eco_top, eco_scores = ecosistema_probable_dia(df)
     if eco_top:
         st.markdown("## 🌍 ECOSISTEMA PROBABLE HOY")
@@ -405,30 +535,12 @@ def main():
             st.write(f"- {eco}: **{sc}%**")
         st.markdown("---")
 
-    rec = calcular_recomendacion(df)
-    if rec and rec["candidatos"]:
-        st.markdown("## 🎯 PRÓXIMA JUGADA")
-        if rec["inestable"]:
-            st.warning("⚠️ Mercado inestable detectado. Prioriza las 🔥🔥🔥.")
-        for c in rec["candidatos"]:
-            nivel = "🔥🔥🔥" if c["votes"] == 3 else ("🔥🔥" if c["votes"] == 2 else "🔥")
-            cargo = " ⚠️ ya repitió 2 veces" if c.get("repes_hoy", 0) >= 2 else ""
-            st.markdown(f"### {nivel} {fmt_num(c['num'])} {ANIMALITOS_DICT[c['num']]}{cargo}")
-            st.caption(f"{ecosistema_de(c['num'])} · Score {c['score_aj']} · Repes hoy {c.get('repes_hoy', 0)}")
-            st.caption(f"🧮 {c['s_mat']} · 🔗 {c['s_trans']} · 📚 {c['s_hist']}")
-        st.markdown("---")
-
-    st.markdown("## 🔥 MAPA DE CALOR (últimos 20 días)")
-    mapa = mapa_calor_horario(df)
-    if mapa:
-        for hora, tops in list(mapa.items())[:14]:
-            linea = " · ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]} ({c}x)" for n, c in tops])
-            st.write(f"**{hora}** → {linea}")
-    st.markdown("---")
-
-    st.markdown("## 📅 HISTORIAL RECONSTRUIDO (últimos 7 días)")
+    # ═══════════════════════════════════════
+    # MEDIDOR HONESTO
+    # ═══════════════════════════════════════
+    st.markdown("## 📊 MEDIDOR HONESTO")
     fechas_unicas = sorted(df["fecha_dt"].dropna().unique())
-    ultimas = fechas_unicas[-7:] if len(fechas_unicas) >= 7 else fechas_unicas
+    ultimas = fechas_unicas[-DIAS_OBSERVACION:] if len(fechas_unicas) >= DIAS_OBSERVACION else fechas_unicas
 
     resumen = []
     with st.spinner("Reconstruyendo historial..."):
@@ -439,31 +551,46 @@ def main():
                 resumen.append(r)
 
     if resumen:
+        prom_normal = sum(r["aciertos_normal"] for r in resumen) / len(resumen)
+        prom_sniper = sum(r["aciertos_sniper"] for r in resumen) / len(resumen)
+
+        col1, col2 = st.columns(2)
+        col1.metric("Modo Normal (3/hora)", f"{prom_normal:.1f}/12")
+        col2.metric("Modo Sniper (1/día)", f"{prom_sniper:.1f}/10")
+
+        st.markdown("**Últimos días:**")
         for r in resumen:
-            estado = "✅" if r["aciertos"] >= META_ACIERTOS else ("🟡" if r["aciertos"] >= 3 else "❌")
-            st.markdown(f"**{estado} {r['fecha']}** → {r['aciertos']}/{r['total']}")
-        with st.expander("Ver detalle del último día"):
-            if resumen:
-                ult = resumen[0]
-                for d in ult["detalle"]:
-                    icono = "✅" if d["acerto"] else "❌"
-                    top3_str = " · ".join([f"{fmt_num(n)} {nom}" for n, nom, _ in d["top3"]])
-                    st.write(f"{icono} **{d['hora']}** · Real: {fmt_num(d['real'])} {d['real_nombre']} | Rec: {top3_str}")
-    else:
-        st.info("Sin datos suficientes para reconstruir.")
-    st.markdown("---")
+            icono_n = "✅" if r["aciertos_normal"] >= 5 else ("🟡" if r["aciertos_normal"] >= 2 else "❌")
+            icono_s = "✅" if r["aciertos_sniper"] >= 1 else "❌"
+            diam_str = fmt_num(r["diamante"]) + " " + ANIMALITOS_DICT.get(r["diamante"], "?") if r["diamante"] else "?"
+            st.write(f"{icono_n} {r['fecha']} · Normal: {r['aciertos_normal']}/12 · {icono_s} Sniper: {r['aciertos_sniper']}/1 (diamante: {diam_str})")
 
-    st.markdown("## 🧪 MODO OBSERVACIÓN")
-    if len(resumen) < MODO_OBSERVACION_DIAS:
-        st.warning(f"⏳ Faltan {MODO_OBSERVACION_DIAS - len(resumen)} días")
-    else:
-        prom = sum(r["aciertos"] for r in resumen) / len(resumen)
-        if prom >= META_ACIERTOS:
-            st.success(f"✅ Promedio {prom:.1f}/12 · MODO JUGABLE")
+        # Veredicto honesto
+        st.markdown("### 🎯 VEREDICTO")
+        if len(resumen) >= DIAS_OBSERVACION:
+            if prom_normal >= 3 or prom_sniper >= 0.3:
+                st.success(f"✅ Hay señal débil. Normal {prom_normal:.1f}/12 · Sniper {prom_sniper:.1f}/día")
+            else:
+                st.error(f"❌ Sin patrón aprendible. Normal {prom_normal:.1f}/12 · Sniper {prom_sniper:.1f}/día")
         else:
-            st.warning(f"⚠️ Promedio {prom:.1f}/12 · Sigue observando")
+            st.info(f"⏳ Observando... {len(resumen)}/{DIAS_OBSERVACION} días")
+    else:
+        st.info("Sin datos para reconstruir.")
+
     st.markdown("---")
 
+    # ═══════════════════════════════════════
+    # MAPA DE CALOR
+    # ═══════════════════════════════════════
+    with st.expander("🔥 Mapa de calor por hora (últimos 20 días)"):
+        mapa = mapa_calor_horario(df)
+        for hora, tops in list(mapa.items())[:14]:
+            linea = " · ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]} ({c}x)" for n, c in tops])
+            st.write(f"**{hora}** → {linea}")
+
+    # ═══════════════════════════════════════
+    # JALES
+    # ═══════════════════════════════════════
     st.markdown("## 🔗 JALES (últimos 60 sorteos)")
     ultimo_num = int(df["numero"].iloc[-1])
     conteo_jal = Counter()
@@ -478,6 +605,9 @@ def main():
             st.write(f"- Después de **{fmt_num(ultimo_num)} {ANIMALITOS_DICT[ultimo_num]}** → **{fmt_num(jale)} {ANIMALITOS_DICT[jale]}** ({c} pts)")
     st.markdown("---")
 
+    # ═══════════════════════════════════════
+    # ÚLTIMO RESULTADO
+    # ═══════════════════════════════════════
     ultimo = df.iloc[-1]
     st.markdown("## 🎯 ÚLTIMO RESULTADO")
     st.markdown(f"### {fmt_num(int(ultimo['numero']))} - {ultimo['nombre']}")
