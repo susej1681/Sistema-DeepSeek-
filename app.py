@@ -2,7 +2,6 @@ import streamlit as st
 import pandas as pd
 import re
 from collections import Counter
-from datetime import datetime, timedelta
 
 st.set_page_config(
     page_title="Granjita Oracle IA",
@@ -14,12 +13,16 @@ GOOGLE_SHEET_ID = "1aP-qP6YXz7HcXuy77GXX4xqMKE3-noLP_jvQflqvE-I"
 GOOGLE_SHEET_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv"
 
 SORTEOS_POR_DIA = 12
-DIAS_VENTANA = 10
-VENTANA_SORTEOS = SORTEOS_POR_DIA * DIAS_VENTANA
+DIAS_VENTANA_LARGA = 10
+DIAS_VENTANA_CORTA = 5
+VENTANA_LARGA = SORTEOS_POR_DIA * DIAS_VENTANA_LARGA
+VENTANA_CORTA = SORTEOS_POR_DIA * DIAS_VENTANA_CORTA
+VENTANA_JALES = 60
+DIAS_HISTORIADOR = 15
+VENTANA_HISTORIADOR = SORTEOS_POR_DIA * DIAS_HISTORIADOR
 DESCARTE_ATRASO = 60
 MODO_OBSERVACION_DIAS = 5
 META_ACIERTOS = 5
-TOP_AGENTE = 12
 
 ANIMALITOS_DICT = {
     0: "Delfín", 1: "Carnero", 2: "Toro", 3: "Ciempiés", 4: "Alacrán",
@@ -104,78 +107,93 @@ def cargar_historial():
         return pd.DataFrame(columns=["fecha", "hora", "numero", "nombre"])
 
 
-def aprender_jales(df, max_salto=3):
-    jales = {n: Counter() for n in ANIMALITOS_DICT.keys()}
+def calcular_ritmos(df):
     nums = df["numero"].tolist()
-    for i in range(len(nums) - 1):
-        for j in range(i + 1, min(i + 1 + max_salto, len(nums))):
-            jales[nums[i]][nums[j]] += 1
-    return jales
-
-
-def agente_matematico(df, ventana=VENTANA_SORTEOS):
-    if df.empty or len(df) < 20:
-        return {}
-    df_v = df.tail(ventana)
-    freq = Counter(df_v["numero"].tolist())
-    total = len(df)
-    atrasos = {}
-    for num in ANIMALITOS_DICT.keys():
-        idxs = df[df["numero"] == num].index.tolist()
-        atrasos[num] = total - 1 - idxs[-1] if idxs else total
-    all_nums = df["numero"].tolist()
     ritmos = {}
     for num in ANIMALITOS_DICT.keys():
-        pos = [i for i, n in enumerate(all_nums) if n == num]
+        pos = [i for i, n in enumerate(nums) if n == num]
         if len(pos) >= 2:
             diffs = [pos[k + 1] - pos[k] for k in range(len(pos) - 1)]
             ritmos[num] = sum(diffs) / len(diffs)
         else:
             ritmos[num] = 999
-    max_freq = max(freq.values()) if freq else 1
+    return ritmos
+
+
+def agente_matematico(df):
+    """Combina ventana corta (dinámica) y larga (estable)."""
+    if df.empty or len(df) < 30:
+        return {}
+    df_corta = df.tail(VENTANA_CORTA)
+    df_larga = df.tail(VENTANA_LARGA)
+    freq_corta = Counter(df_corta["numero"].tolist())
+    freq_larga = Counter(df_larga["numero"].tolist())
+
+    total = len(df)
+    atrasos = {}
+    for num in ANIMALITOS_DICT.keys():
+        idxs = df[df["numero"] == num].index.tolist()
+        atrasos[num] = total - 1 - idxs[-1] if idxs else total
+
+    ritmos = calcular_ritmos(df)
+
+    max_fc = max(freq_corta.values()) if freq_corta else 1
+    max_fl = max(freq_larga.values()) if freq_larga else 1
     max_atr = max(atrasos.values()) if atrasos else 1
+
     scores = {}
     for num in ANIMALITOS_DICT.keys():
-        f = freq.get(num, 0) / max_freq if max_freq else 0
-        a = atrasos.get(num, 0) / max_atr if max_atr else 0
+        fc = freq_corta.get(num, 0) / max_fc
+        fl = freq_larga.get(num, 0) / max_fl
+        atr = atrasos.get(num, 0)
+        a_norm = atr / max_atr
         r = ritmos.get(num, 999)
-        if 0 < r < 500:
-            ratio = atrasos.get(num, 0) / r
-        else:
-            ratio = 0
-        ratio_n = min(ratio, 2) / 2
-        if atrasos.get(num, 0) >= DESCARTE_ATRASO:
-            scores[num] = 0
-        else:
-            scores[num] = round((f * 0.30 + a * 0.30 + ratio_n * 0.40) * 100, 2)
+        ratio = atr / r if 0 < r < 500 else 0
+        ratio_n = min(ratio, 1.5) / 1.5
+
+        # Dinámico: corta pesa más, larga estabiliza
+        score = fc * 0.25 + fl * 0.15 + a_norm * 0.25 + ratio_n * 0.35
+
+        if atr >= DESCARTE_ATRASO:
+            score *= 0.1
+        scores[num] = round(score * 100, 2)
     return scores
 
 
-def agente_transicion(df, jales):
-    if df.empty:
+def agente_transicion(df):
+    """Jales SOLO de los últimos 60 sorteos."""
+    if df.empty or len(df) < 20:
         return {}
-    ultimo = int(df["numero"].iloc[-1])
-    c = jales.get(ultimo, Counter())
-    if not c:
+    df_rec = df.tail(VENTANA_JALES + 1)
+    nums = df_rec["numero"].tolist()
+    if len(nums) < 2:
         return {}
-    max_v = max(c.values())
-    return {num: round(v / max_v * 100, 2) for num, v in c.items()}
+    ultimo = nums[-1]
+    conteo = Counter()
+    for i in range(len(nums) - 1):
+        if nums[i] == ultimo:
+            for j in range(i + 1, min(i + 3, len(nums))):
+                conteo[nums[j]] += (3 - (j - i))
+    if not conteo:
+        return {}
+    max_c = max(conteo.values())
+    return {num: round(v / max_c * 100, 2) for num, v in conteo.items()}
 
 
 def agente_historiador(df, hora_actual):
+    """SOLO últimos 15 días en esa hora específica."""
     if df.empty or "hora" not in df.columns or not hora_actual:
         return {}
-    df_h = df[df["hora"] == hora_actual].tail(120)
-    if df_h.empty:
-        df_h = df.tail(60)
-    conteo = Counter(df_h["numero"].tolist())
-    if not conteo:
+    df_rec = df.tail(VENTANA_HISTORIADOR)
+    df_h = df_rec[df_rec["hora"] == hora_actual]
+    if len(df_h) < 3:
         return {}
+    conteo = Counter(df_h["numero"].tolist())
     max_c = max(conteo.values())
     return {num: round(c / max_c * 100, 2) for num, c in conteo.items()}
 
 
-def consenso_agentes(s_mat, s_trans, s_hist, top_n=TOP_AGENTE):
+def score_combinado(s_mat, s_trans, s_hist, top_n=15):
     top_mat = set([n for n, _ in sorted(s_mat.items(), key=lambda x: x[1], reverse=True)[:top_n]])
     top_trans = set([n for n, _ in sorted(s_trans.items(), key=lambda x: x[1], reverse=True)[:top_n]]) if s_trans else set()
     top_hist = set([n for n, _ in sorted(s_hist.items(), key=lambda x: x[1], reverse=True)[:top_n]]) if s_hist else set()
@@ -186,17 +204,28 @@ def consenso_agentes(s_mat, s_trans, s_hist, top_n=TOP_AGENTE):
         if num in top_mat: votes += 1
         if num in top_trans: votes += 1
         if num in top_hist: votes += 1
-        if votes >= 2:
-            avg = (s_mat.get(num, 0) + s_trans.get(num, 0) + s_hist.get(num, 0)) / 3
+
+        # Score promedio ponderado
+        sm = s_mat.get(num, 0)
+        st_ = s_trans.get(num, 0)
+        sh = s_hist.get(num, 0)
+        base = sm * 0.45 + st_ * 0.30 + sh * 0.25
+
+        # Bonus por consenso
+        if votes == 3: base *= 1.40
+        elif votes == 2: base *= 1.15
+        elif votes == 1: base *= 0.95
+
+        if base > 0:
             resultado.append({
                 "num": num,
                 "votes": votes,
-                "score": round(avg, 2),
-                "s_mat": s_mat.get(num, 0),
-                "s_trans": s_trans.get(num, 0),
-                "s_hist": s_hist.get(num, 0)
+                "score": round(base, 2),
+                "s_mat": sm,
+                "s_trans": st_,
+                "s_hist": sh
             })
-    resultado.sort(key=lambda x: (x["votes"], x["score"]), reverse=True)
+    resultado.sort(key=lambda x: x["score"], reverse=True)
     return resultado
 
 
@@ -205,38 +234,47 @@ def contar_repes_hoy(df, fecha_actual):
     return Counter(df_hoy["numero"].tolist())
 
 
-def aplicar_techo_repeticion(candidatos, repes_hoy):
+def aplicar_techo(candidatos, repes_hoy):
     resultado = []
     for c in candidatos:
         num = c["num"]
         repes = repes_hoy.get(num, 0)
-        if repes >= 2:
-            factor = 0.05
-        elif repes == 1:
-            factor = 0.75
-        else:
-            factor = 1.0
-        resultado.append({**c, "repes_hoy": repes, "score_ajustado": round(c["score"] * factor, 2)})
-    resultado.sort(key=lambda x: (x["votes"], x["score_ajustado"]), reverse=True)
+        if repes >= 2: factor = 0.15
+        elif repes == 1: factor = 0.65
+        else: factor = 1.0
+        resultado.append({**c, "repes_hoy": repes, "score_aj": round(c["score"] * factor, 2)})
+    resultado.sort(key=lambda x: x["score_aj"], reverse=True)
     return resultado
 
 
-def detectar_inestabilidad(df, n=3):
+def diversificar(top3):
+    """Si los 3 son del mismo ecosistema, reemplaza el 3ro."""
+    if len(top3) < 3:
+        return top3
+    ecos = [ecosistema_de(c["num"]) for c in top3]
+    if len(set(ecos)) == 1:
+        return top3[:2]
+    return top3
+
+
+def detectar_inestabilidad(df, n=4):
     if df.empty or len(df) < n:
         return False
     ultimos = df.tail(n)["numero"].tolist()
     ecos = [ecosistema_de(x) for x in ultimos]
-    return len(set(ecos)) >= 3
+    # Solo inestable si los 4 son de ecosistemas distintos
+    return len(set(ecos)) == 4
 
 
 def mapa_calor_horario(df):
     if df.empty or "hora" not in df.columns:
         return {}
     mapa = {}
-    for hora in df["hora"].unique():
+    df_rec = df.tail(SORTEOS_POR_DIA * 20)
+    for hora in df_rec["hora"].unique():
         if not hora or hora.lower() == "hora":
             continue
-        df_h = df[df["hora"] == hora].tail(60)
+        df_h = df_rec[df_rec["hora"] == hora]
         if df_h.empty:
             continue
         conteo = Counter(df_h["numero"].tolist())
@@ -247,7 +285,7 @@ def mapa_calor_horario(df):
 def ecosistema_probable_dia(df):
     if df.empty or len(df) < 30:
         return None, {}
-    df_rec = df.tail(60)
+    df_rec = df.tail(VENTANA_LARGA)
     conteo = Counter([ecosistema_de(n) for n in df_rec["numero"].tolist()])
     total = len(df)
     atrasos = {}
@@ -260,9 +298,40 @@ def ecosistema_probable_dia(df):
     for eco in ECOSISTEMAS.keys():
         f = conteo.get(eco, 0) / max_f
         a = atrasos.get(eco, 0) / max_a
-        scores[eco] = round((f * 0.55 + a * 0.45) * 100, 2)
+        scores[eco] = round((f * 0.60 + a * 0.40) * 100, 2)
     top = max(scores.items(), key=lambda x: x[1])
     return top[0], scores
+
+
+def calcular_recomendacion(df):
+    if df.empty:
+        return None
+    ultima_hora = df["hora"].iloc[-1] if "hora" in df.columns else ""
+    fecha_actual = df["fecha"].iloc[-1]
+
+    s_mat = agente_matematico(df)
+    s_trans = agente_transicion(df)
+    s_hist = agente_historiador(df, ultima_hora)
+
+    cands = score_combinado(s_mat, s_trans, s_hist)
+    repes = contar_repes_hoy(df, fecha_actual)
+    cands = aplicar_techo(cands, repes)
+
+    inestable = detectar_inestabilidad(df)
+    top = cands[:5]
+    top = diversificar(top)
+
+    if inestable:
+        top = [c for c in top if c["votes"] >= 2][:3]
+        if not top:
+            top = cands[:3]
+
+    return {
+        "candidatos": top[:3],
+        "inestable": inestable,
+        "ultima_hora": ultima_hora,
+        "fecha_actual": fecha_actual
+    }
 
 
 def reconstruir_dia(df, fecha_str):
@@ -274,7 +343,6 @@ def reconstruir_dia(df, fecha_str):
     if df_antes.empty or df_dia.empty:
         return None
 
-    jales_base = aprender_jales(df_antes, max_salto=3)
     aciertos = 0
     resultados = []
 
@@ -284,15 +352,15 @@ def reconstruir_dia(df, fecha_str):
         df_hasta = pd.concat([df_antes, df_dia.iloc[:idx]], ignore_index=True)
 
         s_mat = agente_matematico(df_hasta)
-        s_trans = agente_transicion(df_hasta, jales_base)
+        s_trans = agente_transicion(df_hasta)
         s_hist = agente_historiador(df_hasta, hora)
 
-        cands = consenso_agentes(s_mat, s_trans, s_hist)
+        cands = score_combinado(s_mat, s_trans, s_hist)
         fecha_hoy_str = df_hasta["fecha"].iloc[-1] if not df_hasta.empty else ""
         repes = contar_repes_hoy(df_hasta, fecha_hoy_str)
-        cands = aplicar_techo_repeticion(cands, repes)
+        cands = aplicar_techo(cands, repes)
+        top3 = diversificar(cands[:5])[:3]
 
-        top3 = cands[:3]
         acerto = any(c["num"] == num_real for c in top3)
         if acerto:
             aciertos += 1
@@ -312,48 +380,22 @@ def reconstruir_dia(df, fecha_str):
     }
 
 
-def calcular_recomendacion_actual(df):
-    if df.empty:
-        return None
-    jales = aprender_jales(df, max_salto=3)
-    ultima_hora = df["hora"].iloc[-1] if "hora" in df.columns else ""
-    fecha_actual = df["fecha"].iloc[-1]
-
-    s_mat = agente_matematico(df)
-    s_trans = agente_transicion(df, jales)
-    s_hist = agente_historiador(df, ultima_hora)
-
-    cands = consenso_agentes(s_mat, s_trans, s_hist)
-    repes = contar_repes_hoy(df, fecha_actual)
-    cands = aplicar_techo_repeticion(cands, repes)
-
-    estable = not detectar_inestabilidad(df)
-    if not estable:
-        cands = [c for c in cands if c["votes"] == 3]
-    return {
-        "candidatos": cands[:3],
-        "inestable": not estable,
-        "ultima_hora": ultima_hora,
-        "fecha_actual": fecha_actual
-    }
-
-
 def main():
     st.title("🧠 Granjita Oracle IA")
-    st.caption("Red de Agentes · Consenso · Detector de Techo · Ventana 10 días")
+    st.caption("Red de Agentes v2 · Ventana dinámica · Anti-pegado")
 
     if st.button("🔄 Recargar datos"):
         st.cache_data.clear()
         st.rerun()
 
-    with st.spinner("Leyendo hoja de 7 meses..."):
+    with st.spinner("Leyendo hoja..."):
         df = cargar_historial()
 
     if df.empty:
         st.error("No se pudieron cargar datos.")
         return
 
-    st.caption(f"📊 Data cargada: {len(df)} sorteos · {df['fecha'].nunique()} días")
+    st.caption(f"📊 Data: {len(df)} sorteos · {df['fecha'].nunique()} días")
 
     eco_top, eco_scores = ecosistema_probable_dia(df)
     if eco_top:
@@ -363,22 +405,20 @@ def main():
             st.write(f"- {eco}: **{sc}%**")
         st.markdown("---")
 
-    rec = calcular_recomendacion_actual(df)
+    rec = calcular_recomendacion(df)
     if rec and rec["candidatos"]:
         st.markdown("## 🎯 PRÓXIMA JUGADA")
         if rec["inestable"]:
-            st.error("🚨 Mercado inestable. Solo juega el animal de Fuerza Máxima (🔥🔥🔥).")
-        for i, c in enumerate(rec["candidatos"], 1):
-            nivel = "🔥🔥🔥" if c["votes"] == 3 else "🔥🔥"
-            cargo = ""
-            if c.get("repes_hoy", 0) >= 2:
-                cargo = " ⚠️ ya repitió 2 veces"
+            st.warning("⚠️ Mercado inestable detectado. Prioriza las 🔥🔥🔥.")
+        for c in rec["candidatos"]:
+            nivel = "🔥🔥🔥" if c["votes"] == 3 else ("🔥🔥" if c["votes"] == 2 else "🔥")
+            cargo = " ⚠️ ya repitió 2 veces" if c.get("repes_hoy", 0) >= 2 else ""
             st.markdown(f"### {nivel} {fmt_num(c['num'])} {ANIMALITOS_DICT[c['num']]}{cargo}")
-            st.caption(f"Ecosistema: {ecosistema_de(c['num'])} · Score: {c['score_ajustado']} · Repes hoy: {c.get('repes_hoy', 0)}")
-            st.caption(f"🧮 Matemático: {c['s_mat']} · 🔗 Transición: {c['s_trans']} · 📚 Historiador: {c['s_hist']}")
+            st.caption(f"{ecosistema_de(c['num'])} · Score {c['score_aj']} · Repes hoy {c.get('repes_hoy', 0)}")
+            st.caption(f"🧮 {c['s_mat']} · 🔗 {c['s_trans']} · 📚 {c['s_hist']}")
         st.markdown("---")
 
-    st.markdown("## 🔥 MAPA DE CALOR POR HORA")
+    st.markdown("## 🔥 MAPA DE CALOR (últimos 20 días)")
     mapa = mapa_calor_horario(df)
     if mapa:
         for hora, tops in list(mapa.items())[:14]:
@@ -391,49 +431,51 @@ def main():
     ultimas = fechas_unicas[-7:] if len(fechas_unicas) >= 7 else fechas_unicas
 
     resumen = []
-    for fecha in reversed(ultimas):
-        f_str = pd.to_datetime(fecha).strftime("%d/%m/%Y")
-        r = reconstruir_dia(df, f_str)
-        if r:
-            resumen.append(r)
+    with st.spinner("Reconstruyendo historial..."):
+        for fecha in reversed(ultimas):
+            f_str = pd.to_datetime(fecha).strftime("%d/%m/%Y")
+            r = reconstruir_dia(df, f_str)
+            if r:
+                resumen.append(r)
 
     if resumen:
         for r in resumen:
-            estado = "✅" if r["aciertos"] >= META_ACIERTOS else "🟡" if r["aciertos"] >= 3 else "❌"
-            st.markdown(f"**{estado} {r['fecha']}** → {r['aciertos']}/{r['total']} aciertos")
+            estado = "✅" if r["aciertos"] >= META_ACIERTOS else ("🟡" if r["aciertos"] >= 3 else "❌")
+            st.markdown(f"**{estado} {r['fecha']}** → {r['aciertos']}/{r['total']}")
         with st.expander("Ver detalle del último día"):
             if resumen:
                 ult = resumen[0]
-                st.markdown(f"**{ult['fecha']}**")
                 for d in ult["detalle"]:
                     icono = "✅" if d["acerto"] else "❌"
                     top3_str = " · ".join([f"{fmt_num(n)} {nom}" for n, nom, _ in d["top3"]])
-                    st.write(f"{icono} **{d['hora']}** → Real: {fmt_num(d['real'])} {d['real_nombre']} | Rec: {top3_str}")
+                    st.write(f"{icono} **{d['hora']}** · Real: {fmt_num(d['real'])} {d['real_nombre']} | Rec: {top3_str}")
     else:
-        st.info("No hay suficientes datos para reconstruir el historial.")
-
+        st.info("Sin datos suficientes para reconstruir.")
     st.markdown("---")
 
     st.markdown("## 🧪 MODO OBSERVACIÓN")
-    total_dias_reconstruidos = len(resumen)
-    if total_dias_reconstruidos < MODO_OBSERVACION_DIAS:
-        st.warning(f"⏳ Faltan {MODO_OBSERVACION_DIAS - total_dias_reconstruidos} días para salir de observación")
+    if len(resumen) < MODO_OBSERVACION_DIAS:
+        st.warning(f"⏳ Faltan {MODO_OBSERVACION_DIAS - len(resumen)} días")
     else:
-        promedio = sum(r["aciertos"] for r in resumen) / len(resumen)
-        if promedio >= META_ACIERTOS:
-            st.success(f"✅ Promedio últimos {len(resumen)} días: {promedio:.1f}/12 · MODO JUGABLE")
+        prom = sum(r["aciertos"] for r in resumen) / len(resumen)
+        if prom >= META_ACIERTOS:
+            st.success(f"✅ Promedio {prom:.1f}/12 · MODO JUGABLE")
         else:
-            st.warning(f"⚠️ Promedio últimos {len(resumen)} días: {promedio:.1f}/12 · Sigue observando")
-
+            st.warning(f"⚠️ Promedio {prom:.1f}/12 · Sigue observando")
     st.markdown("---")
 
-    st.markdown("## 🔗 JALES APRENDIDOS")
+    st.markdown("## 🔗 JALES (últimos 60 sorteos)")
     ultimo_num = int(df["numero"].iloc[-1])
-    jales_ap = aprender_jales(df, max_salto=3)
-    jales_ult = jales_ap.get(ultimo_num, Counter())
-    if jales_ult:
-        for jale, c in jales_ult.most_common(5):
-            st.write(f"- Después de **{fmt_num(ultimo_num)} {ANIMALITOS_DICT[ultimo_num]}** → **{fmt_num(jale)} {ANIMALITOS_DICT[jale]}** ({c} veces)")
+    conteo_jal = Counter()
+    df_rec_j = df.tail(VENTANA_JALES + 1)
+    nums_j = df_rec_j["numero"].tolist()
+    for i in range(len(nums_j) - 1):
+        if nums_j[i] == ultimo_num:
+            for j in range(i + 1, min(i + 3, len(nums_j))):
+                conteo_jal[nums_j[j]] += (3 - (j - i))
+    if conteo_jal:
+        for jale, c in conteo_jal.most_common(5):
+            st.write(f"- Después de **{fmt_num(ultimo_num)} {ANIMALITOS_DICT[ultimo_num]}** → **{fmt_num(jale)} {ANIMALITOS_DICT[jale]}** ({c} pts)")
     st.markdown("---")
 
     ultimo = df.iloc[-1]
@@ -446,7 +488,7 @@ def main():
             nombres = ", ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]}" for n in lista])
             st.markdown(f"**{eco}:** {nombres}")
 
-    with st.expander("📋 Ver últimos 30 sorteos"):
+    with st.expander("📋 Últimos 30 sorteos"):
         cols = ["fecha", "hora", "numero", "nombre"] if "hora" in df.columns else ["fecha", "numero", "nombre"]
         st.dataframe(df.tail(30)[cols], use_container_width=True)
 
