@@ -4,8 +4,8 @@ import re
 from collections import Counter
 
 st.set_page_config(
-    page_title="Test Multi-Variantes",
-    page_icon="🧪",
+    page_title="Test Fríos vs Enjaulados",
+    page_icon="❄️",
     layout="centered"
 )
 
@@ -58,13 +58,12 @@ def cargar_historial():
                     val = str(df_raw.iloc[fd, col]).strip()
                     if not val or val.lower() == "nan" or val.lower() == "hora":
                         continue
-                    hora_val = str(df_raw.iloc[fd, 0]).strip()
                     m = re.search(r'\((\d+)\)', val)
                     if m:
                         ns = m.group(1)
                         num = 100 if ns == "00" else int(ns)
                         nombre = ANIMALITOS_DICT.get(num, re.sub(r'\s*\(\d+\)', '', val).strip())
-                        registros.append({"fecha": fecha, "hora": hora_val, "numero": num, "nombre": nombre})
+                        registros.append({"fecha": fecha, "numero": num, "nombre": nombre})
         df = pd.DataFrame(registros)
         if not df.empty:
             df["fecha_dt"] = pd.to_datetime(df["fecha"], format="%d/%m/%Y", errors="coerce")
@@ -72,113 +71,165 @@ def cargar_historial():
         return df
     except Exception as e:
         st.error(f"Error: {e}")
-        return pd.DataFrame(columns=["fecha", "hora", "numero", "nombre"])
+        return pd.DataFrame(columns=["fecha", "numero", "nombre"])
 
 
-def test_variante(df, ventana_dias, top_n):
-    fechas_unicas = sorted(df["fecha_dt"].dropna().unique())
-    if len(fechas_unicas) < ventana_dias + 1:
-        return None
-
-    aciertos_cal = 0
-    aciertos_fri = 0
-    esperado = 0
-    total_sorteos = 0
+def get_frios(df_hasta, top_n=10, ventana_dias=5):
+    """Top N fríos por frecuencia en últimos N días."""
+    fechas_unicas = sorted(df_hasta["fecha_dt"].dropna().unique())
+    if len(fechas_unicas) < ventana_dias:
+        return []
+    fechas_ventana = fechas_unicas[-ventana_dias:]
+    df_vent = df_hasta[df_hasta["fecha_dt"].isin(fechas_ventana)]
+    conteo = Counter(df_vent["numero"].tolist())
     todos = list(ANIMALITOS_DICT.keys())
-    prob = top_n / len(todos)
+    ordenados = sorted(todos, key=lambda n: (conteo.get(n, 0), n))
+    return ordenados[:top_n]
 
-    for i in range(ventana_dias, len(fechas_unicas)):
-        fecha_actual = fechas_unicas[i]
-        fecha_ventana = fechas_unicas[i - ventana_dias:i]
 
-        df_ventana = df[df["fecha_dt"].isin(fecha_ventana)]
-        df_dia = df[df["fecha_dt"] == fecha_actual]
+def get_enjaulados(df_hasta, min_dias=5, max_n=10):
+    """Animalitos que llevan X+ días sin salir."""
+    fechas_unicas = sorted(df_hasta["fecha_dt"].dropna().unique())
+    if len(fechas_unicas) < min_dias:
+        return []
+    todos = list(ANIMALITOS_DICT.keys())
+    dias_sin_salir = {}
+    for num in todos:
+        df_num = df_hasta[df_hasta["numero"] == num]
+        if df_num.empty:
+            dias_sin_salir[num] = 999
+            continue
+        ultima_vez = df_num["fecha_dt"].max()
+        dias = (fechas_unicas[-1] - ultima_vez).days
+        dias_sin_salir[num] = dias
+    # Los que llevan min_dias+ sin salir, ordenados por más días
+    candidatos = [(n, d) for n, d in dias_sin_salir.items() if d >= min_dias]
+    candidatos.sort(key=lambda x: x[1], reverse=True)
+    return [n for n, _ in candidatos[:max_n]]
 
-        if df_ventana.empty or df_dia.empty:
+
+def generar_5_tripletas(pool):
+    """Genera 5 tripletas distintas combinando el pool."""
+    if len(pool) < 3:
+        return []
+
+    combinaciones = [
+        (0, 1, 2),
+        (0, 3, 4),
+        (1, 5, 6),
+        (2, 7, 8),
+        (3, 8, 9),
+    ]
+
+    tripletas = []
+    for c in combinaciones:
+        if all(i < len(pool) for i in c):
+            tripletas.append([pool[i] for i in c])
+    return tripletas
+
+
+def backtest(df, metodo="frios", dias_test=30):
+    """Testea 5 tripletas con el método elegido."""
+    fechas_unicas = sorted(df["fecha_dt"].dropna().unique())
+    if len(fechas_unicas) < dias_test + 6:
+        dias_test = len(fechas_unicas) - 6
+
+    fechas_test = fechas_unicas[-dias_test:]
+    resultados = []
+    tripletas_pegadas = 0
+
+    for fecha_actual in fechas_test:
+        df_hasta = df[df["fecha_dt"] < fecha_actual]
+        if len(df_hasta) < 60:
             continue
 
-        conteo = Counter(df_ventana["numero"].tolist())
-        ordenados = sorted(todos, key=lambda n: conteo.get(n, 0), reverse=True)
-        top_cal = set(ordenados[:top_n])
-        top_fri = set(ordenados[-top_n:])
+        df_dia = df[df["fecha_dt"] == fecha_actual]
+        if df_dia.empty:
+            continue
 
-        nums_dia = df_dia["numero"].tolist()
-        total_sorteos += len(nums_dia)
-        esperado += prob * len(nums_dia)
+        if metodo == "frios":
+            pool = get_frios(df_hasta, top_n=10, ventana_dias=5)
+        else:  # enjaulados
+            pool = get_enjaulados(df_hasta, min_dias=5, max_n=10)
 
-        for num in nums_dia:
-            if num in top_cal:
-                aciertos_cal += 1
-            if num in top_fri:
-                aciertos_fri += 1
+        tripletas = generar_5_tripletas(pool)
+        if not tripletas:
+            continue
+
+        nums_dia = set(df_dia["numero"].tolist())
+        pego_hoy = False
+        detalle = []
+
+        for i, trip in enumerate(tripletas, 1):
+            if all(n in nums_dia for n in trip):
+                tripletas_pegadas += 1
+                pego_hoy = True
+                detalle.append({"num": i, "tripleta": trip, "pego": True})
+            else:
+                salieron = sum(1 for n in trip if n in nums_dia)
+                detalle.append({"num": i, "tripleta": trip, "pego": False, "salieron": salieron})
+
+        resultados.append({
+            "fecha": pd.to_datetime(fecha_actual).strftime("%d/%m/%Y"),
+            "pego": pego_hoy,
+            "detalle": detalle
+        })
 
     return {
-        "cal": aciertos_cal,
-        "fri": aciertos_fri,
-        "esp": round(esperado, 1),
-        "total": total_sorteos,
-        "ventana": ventana_dias,
-        "top": top_n
+        "total_dias": len(resultados),
+        "dias_con_tripleta": sum(1 for r in resultados if r["pego"]),
+        "tripletas_pegadas": tripletas_pegadas,
+        "resultados": resultados
     }
 
 
-def test_por_hora(df, top_n=5):
-    """Analiza por cada hora específica."""
-    if "hora" not in df.columns:
-        return []
+def mostrar_resultados(resultado, titulo, emoji):
+    st.markdown(f"## {emoji} {titulo}")
 
-    horas = df["hora"].dropna().unique().tolist()
-    resultados = []
+    if not resultado:
+        st.warning("Sin datos suficientes.")
+        return
 
-    for hora in horas:
-        if not hora or hora.lower() == "hora":
-            continue
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Días", resultado["total_dias"])
+    col2.metric("Días con ✅", resultado["dias_con_tripleta"])
+    col3.metric("Tripletas ✅", resultado["tripletas_pegadas"])
 
-        df_hora = df[df["hora"] == hora].reset_index(drop=True)
-        if len(df_hora) < 50:
-            continue
+    # Rentabilidad
+    inversion = resultado["total_dias"] * 500
+    ganancia = resultado["tripletas_pegadas"] * 5000
+    neto = ganancia - inversion
+    pct_dias = resultado["dias_con_tripleta"] / resultado["total_dias"] * 100 if resultado["total_dias"] > 0 else 0
 
-        aciertos_cal = 0
-        aciertos_fri = 0
-        esperado = 0
-        total = 0
-        todos = list(ANIMALITOS_DICT.keys())
-        prob = top_n / len(todos)
+    st.markdown(f"**Días con al menos 1 tripleta: {pct_dias:.1f}%**")
 
-        for i in range(10, len(df_hora)):
-            df_vent = df_hora.iloc[max(0, i - 10):i]
-            num_real = int(df_hora.iloc[i]["numero"])
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Invertido", f"{inversion:,}")
+    col2.metric("Ganado", f"{ganancia:,}")
+    col3.metric("Neto", f"{neto:+,}")
 
-            conteo = Counter(df_vent["numero"].tolist())
-            ordenados = sorted(todos, key=lambda n: conteo.get(n, 0), reverse=True)
-            top_cal = set(ordenados[:top_n])
-            top_fri = set(ordenados[-top_n:])
+    if neto > 0:
+        st.success(f"✅ GANANCIA en 30 días: +{neto:,} Bs")
+    elif neto == 0:
+        st.warning("🟡 EMPATE")
+    else:
+        st.error(f"❌ PÉRDIDA en 30 días: {neto:,} Bs")
 
-            total += 1
-            esperado += prob
-            if num_real in top_cal:
-                aciertos_cal += 1
-            if num_real in top_fri:
-                aciertos_fri += 1
-
-        if total > 0:
-            resultados.append({
-                "hora": hora,
-                "cal": aciertos_cal,
-                "fri": aciertos_fri,
-                "esp": round(esperado, 1),
-                "total": total,
-                "cal_pct": round(aciertos_cal / total * 100, 1),
-                "fri_pct": round(aciertos_fri / total * 100, 1),
-                "esp_pct": round(esperado / total * 100, 1)
-            })
-
-    return resultados
+    with st.expander("Ver detalle día por día"):
+        for r in resultado["resultados"]:
+            emoji_d = "✅" if r["pego"] else "❌"
+            st.write(f"{emoji_d} **{r['fecha']}**")
+            for d in r["detalle"]:
+                nombres = " + ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]}" for n in d["tripleta"]])
+                if d["pego"]:
+                    st.write(f"   ✅ T#{d['num']}: {nombres}")
+                else:
+                    st.write(f"   ❌ T#{d['num']}: {nombres} ({d.get('salieron', 0)}/3)")
 
 
 def main():
-    st.title("🧪 TEST MULTI-VARIANTES")
-    st.caption("Buscando el hueco: diferentes ventanas y top N")
+    st.title("❄️ FRÍOS vs 🔒 ENJAULADOS")
+    st.caption("Comparamos cuál método pega más tripletas")
 
     if st.button("🔄 Recargar datos"):
         st.cache_data.clear()
@@ -193,95 +244,58 @@ def main():
 
     st.caption(f"📊 Data: {len(df)} sorteos · {df['fecha'].nunique()} días")
 
-    # ═══════════════════════════════════════
-    # TEST 1-5: Diferentes ventanas y top N
-    # ═══════════════════════════════════════
-    st.markdown("## 📊 VARIANTES DE VENTANA Y TOP N")
-
-    variantes = [
-        (1, 5, "1 día · Top 5"),
-        (3, 5, "3 días · Top 5"),
-        (5, 5, "5 días · Top 5"),
-        (10, 5, "10 días · Top 5"),
-        (3, 3, "3 días · Top 3"),
-        (3, 10, "3 días · Top 10"),
-    ]
-
-    with st.spinner("Analizando variantes..."):
-        resultados = []
-        for vd, tn, nombre in variantes:
-            r = test_variante(df, vd, tn)
-            if r:
-                r["nombre"] = nombre
-                r["dif_cal"] = round(r["cal"] - r["esp"], 1)
-                r["dif_fri"] = round(r["fri"] - r["esp"], 1)
-                resultados.append(r)
-
-    for r in resultados:
-        st.markdown(f"### 📌 {r['nombre']}")
-        col1, col2, col3 = st.columns(3)
-        col1.metric("🔥 Calientes", f"{r['cal']} ({r['dif_cal']:+.1f})")
-        col2.metric("❄️ Fríos", f"{r['fri']} ({r['dif_fri']:+.1f})")
-        col3.metric("🎲 Esperado", r['esp'])
-
-        # Veredicto
-        dif = r['fri'] - r['cal']
-        pct_dif = (dif / r['esp']) * 100 if r['esp'] > 0 else 0
-        if pct_dif >= 10:
-            st.success(f"✅ Hueco: fríos salen {pct_dif:.1f}% más")
-        elif pct_dif >= 5:
-            st.info(f"🟡 Tendencia débil: fríos +{pct_dif:.1f}%")
-        elif pct_dif <= -10:
-            st.warning(f"⚠️ Al revés: calientes salen más")
-        else:
-            st.write(f"🎲 Sin hueco claro ({pct_dif:+.1f}%)")
-        st.markdown("---")
-
-    # ═══════════════════════════════════════
-    # TEST 6: POR HORA
-    # ═══════════════════════════════════════
-    st.markdown("## ⏰ ANÁLISIS POR HORA")
-    st.caption("Buscando si hay una hora donde los fríos explotan")
-
-    with st.spinner("Analizando por hora..."):
-        res_hora = test_por_hora(df, top_n=5)
-
-    if res_hora:
-        # Ordenar por mejor hueco (fri - cal)
-        res_hora.sort(key=lambda x: (x['fri'] - x['cal']), reverse=True)
-
-        st.markdown("**Mejores horas (donde los fríos explotan):**")
-        for r in res_hora[:5]:
-            dif_pct = r['fri_pct'] - r['cal_pct']
-            emoji = "✅" if dif_pct >= 5 else ("🟡" if dif_pct >= 2 else "🎲")
-            st.write(f"{emoji} **{r['hora']}** — 🔥 Cal {r['cal_pct']}% · ❄️ Fríos {r['fri_pct']}% · 🎲 Esp {r['esp_pct']}%")
-
-        st.markdown("**Peores horas (donde los calientes explotan):**")
-        for r in res_hora[-3:]:
-            dif_pct = r['fri_pct'] - r['cal_pct']
-            st.write(f"⚠️ **{r['hora']}** — 🔥 Cal {r['cal_pct']}% · ❄️ Fríos {r['fri_pct']}% · 🎲 Esp {r['esp_pct']}%")
-    else:
-        st.warning("No se pudo analizar por hora.")
-
+    # TRIPLETAS PARA HOY - FRÍOS
+    st.markdown("## 🎯 TRIPLETAS PARA HOY (basado en FRÍOS)")
+    frios = get_frios(df, top_n=10, ventana_dias=5)
+    if frios:
+        linea = " · ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]}" for n in frios])
+        st.markdown(f"**Top 10 fríos:** {linea}")
+        tripletas = generar_5_tripletas(frios)
+        for i, trip in enumerate(tripletas, 1):
+            nombres = " + ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]}" for n in trip])
+            st.write(f"**T#{i}:** {nombres}")
     st.markdown("---")
 
-    # ═══════════════════════════════════════
-    # CONCLUSIÓN
-    # ═══════════════════════════════════════
-    st.markdown("## 🎯 CONCLUSIÓN")
+    # TRIPLETAS PARA HOY - ENJAULADOS
+    st.markdown("## 🎯 TRIPLETAS PARA HOY (basado en ENJAULADOS 5+ días)")
+    enj = get_enjaulados(df, min_dias=5, max_n=10)
+    if enj:
+        linea = " · ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]}" for n in enj])
+        st.markdown(f"**Enjaulados:** {linea}")
+        tripletas_enj = generar_5_tripletas(enj)
+        for i, trip in enumerate(tripletas_enj, 1):
+            nombres = " + ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]}" for n in trip])
+            st.write(f"**T#{i}:** {nombres}")
+    else:
+        st.info("No hay animalitos enjaulados 5+ días ahora mismo.")
+    st.markdown("---")
 
-    mejor = max(resultados, key=lambda x: x['fri'] - x['cal']) if resultados else None
-    if mejor:
-        dif = mejor['fri'] - mejor['cal']
-        pct = (dif / mejor['esp']) * 100 if mejor['esp'] > 0 else 0
-        st.markdown(f"**Mejor variante:** {mejor['nombre']}")
-        st.markdown(f"**Diferencia:** fríos salen {pct:+.1f}% vs azar")
-        if pct >= 10:
-            st.success("✅ HAY HUECO — vale la pena investigar más")
-        elif pct >= 5:
-            st.info("🟡 HUECO DÉBIL — puede servir pero con cuidado")
+    # BACKTESTING
+    st.markdown("## 📊 BACKTESTING — ÚLTIMOS 30 DÍAS")
+
+    with st.spinner("Analizando fríos..."):
+        res_frios = backtest(df, metodo="frios", dias_test=30)
+
+    with st.spinner("Analizando enjaulados..."):
+        res_enj = backtest(df, metodo="enjaulados", dias_test=30)
+
+    mostrar_resultados(res_frios, "❄️ MÉTODO FRÍOS", "❄️")
+    st.markdown("---")
+    mostrar_resultados(res_enj, "🔒 MÉTODO ENJAULADOS", "🔒")
+    st.markdown("---")
+
+    # VEREDICTO FINAL
+    st.markdown("## 🏆 VEREDICTO")
+
+    if res_frios and res_enj:
+        fr = res_frios["tripletas_pegadas"]
+        en = res_enj["tripletas_pegadas"]
+        if fr > en:
+            st.success(f"✅ GANA **FRÍOS** con {fr} tripletas vs {en} enjaulados")
+        elif en > fr:
+            st.success(f"✅ GANA **ENJAULADOS** con {en} tripletas vs {fr} fríos")
         else:
-            st.warning("❌ SIN HUECO CLARO — el azar manda")
+            st.info(f"🤝 EMPATE — ambos con {fr} tripletas")
 
 
 if __name__ == "__main__":
