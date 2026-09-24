@@ -4,7 +4,7 @@ import re
 from collections import Counter
 
 st.set_page_config(
-    page_title="Granjita Dixie - Test",
+    page_title="Test Multi-Variantes",
     page_icon="🧪",
     layout="centered"
 )
@@ -58,37 +58,34 @@ def cargar_historial():
                     val = str(df_raw.iloc[fd, col]).strip()
                     if not val or val.lower() == "nan" or val.lower() == "hora":
                         continue
+                    hora_val = str(df_raw.iloc[fd, 0]).strip()
                     m = re.search(r'\((\d+)\)', val)
                     if m:
                         ns = m.group(1)
                         num = 100 if ns == "00" else int(ns)
                         nombre = ANIMALITOS_DICT.get(num, re.sub(r'\s*\(\d+\)', '', val).strip())
-                        registros.append({"fecha": fecha, "numero": num, "nombre": nombre})
+                        registros.append({"fecha": fecha, "hora": hora_val, "numero": num, "nombre": nombre})
         df = pd.DataFrame(registros)
         if not df.empty:
             df["fecha_dt"] = pd.to_datetime(df["fecha"], format="%d/%m/%Y", errors="coerce")
             df = df.sort_values(["fecha_dt"], kind="stable").reset_index(drop=True)
         return df
     except Exception as e:
-        st.error(f"Error cargando: {e}")
-        return pd.DataFrame(columns=["fecha", "numero", "nombre"])
+        st.error(f"Error: {e}")
+        return pd.DataFrame(columns=["fecha", "hora", "numero", "nombre"])
 
 
-def test_teoria_calientes_frios(df, ventana_dias=3, top_n=5):
-    """Mide si los calientes salen menos que los fríos."""
-    if df.empty or len(df) < 100:
-        return None
-
+def test_variante(df, ventana_dias, top_n):
     fechas_unicas = sorted(df["fecha_dt"].dropna().unique())
     if len(fechas_unicas) < ventana_dias + 1:
         return None
 
-    total_sorteos_calientes = 0
-    total_sorteos_frios = 0
-    aciertos_calientes = 0
-    aciertos_frios = 0
-    aciertos_esperados_calientes = 0
-    aciertos_esperados_frios = 0
+    aciertos_cal = 0
+    aciertos_fri = 0
+    esperado = 0
+    total_sorteos = 0
+    todos = list(ANIMALITOS_DICT.keys())
+    prob = top_n / len(todos)
 
     for i in range(ventana_dias, len(fechas_unicas)):
         fecha_actual = fechas_unicas[i]
@@ -101,44 +98,87 @@ def test_teoria_calientes_frios(df, ventana_dias=3, top_n=5):
             continue
 
         conteo = Counter(df_ventana["numero"].tolist())
-        # Para todos los animalitos que existen
-        todos = list(ANIMALITOS_DICT.keys())
-
-        # Ordenar por frecuencia
         ordenados = sorted(todos, key=lambda n: conteo.get(n, 0), reverse=True)
-
-        top_calientes = ordenados[:top_n]
-        top_frios = ordenados[-top_n:]
+        top_cal = set(ordenados[:top_n])
+        top_fri = set(ordenados[-top_n:])
 
         nums_dia = df_dia["numero"].tolist()
-        total_sorteos_calientes += len(nums_dia)
-        total_sorteos_frios += len(nums_dia)
+        total_sorteos += len(nums_dia)
+        esperado += prob * len(nums_dia)
 
         for num in nums_dia:
-            if num in top_calientes:
-                aciertos_calientes += 1
-            if num in top_frios:
-                aciertos_frios += 1
-
-        # Esperado por azar: (top_n / 38) * len(nums_dia)
-        prob_azar = top_n / len(todos)
-        aciertos_esperados_calientes += prob_azar * len(nums_dia)
-        aciertos_esperados_frios += prob_azar * len(nums_dia)
+            if num in top_cal:
+                aciertos_cal += 1
+            if num in top_fri:
+                aciertos_fri += 1
 
     return {
-        "calientes_reales": aciertos_calientes,
-        "calientes_esperados": round(aciertos_esperados_calientes, 1),
-        "frios_reales": aciertos_frios,
-        "frios_esperados": round(aciertos_esperados_frios, 1),
-        "total_sorteos": total_sorteos_calientes,
-        "ventana_dias": ventana_dias,
-        "top_n": top_n,
+        "cal": aciertos_cal,
+        "fri": aciertos_fri,
+        "esp": round(esperado, 1),
+        "total": total_sorteos,
+        "ventana": ventana_dias,
+        "top": top_n
     }
 
 
+def test_por_hora(df, top_n=5):
+    """Analiza por cada hora específica."""
+    if "hora" not in df.columns:
+        return []
+
+    horas = df["hora"].dropna().unique().tolist()
+    resultados = []
+
+    for hora in horas:
+        if not hora or hora.lower() == "hora":
+            continue
+
+        df_hora = df[df["hora"] == hora].reset_index(drop=True)
+        if len(df_hora) < 50:
+            continue
+
+        aciertos_cal = 0
+        aciertos_fri = 0
+        esperado = 0
+        total = 0
+        todos = list(ANIMALITOS_DICT.keys())
+        prob = top_n / len(todos)
+
+        for i in range(10, len(df_hora)):
+            df_vent = df_hora.iloc[max(0, i - 10):i]
+            num_real = int(df_hora.iloc[i]["numero"])
+
+            conteo = Counter(df_vent["numero"].tolist())
+            ordenados = sorted(todos, key=lambda n: conteo.get(n, 0), reverse=True)
+            top_cal = set(ordenados[:top_n])
+            top_fri = set(ordenados[-top_n:])
+
+            total += 1
+            esperado += prob
+            if num_real in top_cal:
+                aciertos_cal += 1
+            if num_real in top_fri:
+                aciertos_fri += 1
+
+        if total > 0:
+            resultados.append({
+                "hora": hora,
+                "cal": aciertos_cal,
+                "fri": aciertos_fri,
+                "esp": round(esperado, 1),
+                "total": total,
+                "cal_pct": round(aciertos_cal / total * 100, 1),
+                "fri_pct": round(aciertos_fri / total * 100, 1),
+                "esp_pct": round(esperado / total * 100, 1)
+            })
+
+    return resultados
+
+
 def main():
-    st.title("🧪 TEST DE LA TEORÍA")
-    st.caption("¿Los calientes salen menos? ¿Los fríos salen más?")
+    st.title("🧪 TEST MULTI-VARIANTES")
+    st.caption("Buscando el hueco: diferentes ventanas y top N")
 
     if st.button("🔄 Recargar datos"):
         st.cache_data.clear()
@@ -148,65 +188,100 @@ def main():
         df = cargar_historial()
 
     if df.empty:
-        st.error("No se pudieron cargar datos.")
+        st.error("Sin datos.")
         return
 
     st.caption(f"📊 Data: {len(df)} sorteos · {df['fecha'].nunique()} días")
 
-    st.markdown("## 📖 ¿QUÉ VAMOS A MEDIR?")
-    st.write("""
-    Vamos a recorrer TODOS los días del histórico.
-    Para cada día:
-    - Miramos los **últimos 3 días** antes de ese día.
-    - Marcamos los **5 más calientes** (los que más salieron).
-    - Marcamos los **5 más fríos** (los que menos salieron).
-    - Miramos qué salió ese día.
-    - Contamos si salieron los calientes o los fríos.
-    
-    **Si es azar puro:** calientes y fríos saldrán igual (~13% cada uno).
-    **Si tu teoría es cierta:** los fríos saldrán más que los calientes.
-    """)
+    # ═══════════════════════════════════════
+    # TEST 1-5: Diferentes ventanas y top N
+    # ═══════════════════════════════════════
+    st.markdown("## 📊 VARIANTES DE VENTANA Y TOP N")
 
-    st.markdown("---")
+    variantes = [
+        (1, 5, "1 día · Top 5"),
+        (3, 5, "3 días · Top 5"),
+        (5, 5, "5 días · Top 5"),
+        (10, 5, "10 días · Top 5"),
+        (3, 3, "3 días · Top 3"),
+        (3, 10, "3 días · Top 10"),
+    ]
 
-    with st.spinner("Analizando 199 días..."):
-        resultado = test_teoria_calientes_frios(df, ventana_dias=3, top_n=5)
+    with st.spinner("Analizando variantes..."):
+        resultados = []
+        for vd, tn, nombre in variantes:
+            r = test_variante(df, vd, tn)
+            if r:
+                r["nombre"] = nombre
+                r["dif_cal"] = round(r["cal"] - r["esp"], 1)
+                r["dif_fri"] = round(r["fri"] - r["esp"], 1)
+                resultados.append(r)
 
-    if not resultado:
-        st.error("Datos insuficientes para el test.")
-        return
+    for r in resultados:
+        st.markdown(f"### 📌 {r['nombre']}")
+        col1, col2, col3 = st.columns(3)
+        col1.metric("🔥 Calientes", f"{r['cal']} ({r['dif_cal']:+.1f})")
+        col2.metric("❄️ Fríos", f"{r['fri']} ({r['dif_fri']:+.1f})")
+        col3.metric("🎲 Esperado", r['esp'])
 
-    st.markdown("## 📊 RESULTADOS")
+        # Veredicto
+        dif = r['fri'] - r['cal']
+        pct_dif = (dif / r['esp']) * 100 if r['esp'] > 0 else 0
+        if pct_dif >= 10:
+            st.success(f"✅ Hueco: fríos salen {pct_dif:.1f}% más")
+        elif pct_dif >= 5:
+            st.info(f"🟡 Tendencia débil: fríos +{pct_dif:.1f}%")
+        elif pct_dif <= -10:
+            st.warning(f"⚠️ Al revés: calientes salen más")
+        else:
+            st.write(f"🎲 Sin hueco claro ({pct_dif:+.1f}%)")
+        st.markdown("---")
 
-    col1, col2 = st.columns(2)
+    # ═══════════════════════════════════════
+    # TEST 6: POR HORA
+    # ═══════════════════════════════════════
+    st.markdown("## ⏰ ANÁLISIS POR HORA")
+    st.caption("Buscando si hay una hora donde los fríos explotan")
 
-    with col1:
-        st.markdown("### 🔥 CALIENTES")
-        st.metric("Salieron", resultado["calientes_reales"])
-        st.metric("Esperado por azar", resultado["calientes_esperados"])
-        dif_cal = resultado["calientes_reales"] - resultado["calientes_esperados"]
-        st.metric("Diferencia", f"{dif_cal:+.1f}")
+    with st.spinner("Analizando por hora..."):
+        res_hora = test_por_hora(df, top_n=5)
 
-    with col2:
-        st.markdown("### ❄️ FRÍOS")
-        st.metric("Salieron", resultado["frios_reales"])
-        st.metric("Esperado por azar", resultado["frios_esperados"])
-        dif_fri = resultado["frios_reales"] - resultado["frios_esperados"]
-        st.metric("Diferencia", f"{dif_fri:+.1f}")
+    if res_hora:
+        # Ordenar por mejor hueco (fri - cal)
+        res_hora.sort(key=lambda x: (x['fri'] - x['cal']), reverse=True)
 
-    st.markdown("---")
+        st.markdown("**Mejores horas (donde los fríos explotan):**")
+        for r in res_hora[:5]:
+            dif_pct = r['fri_pct'] - r['cal_pct']
+            emoji = "✅" if dif_pct >= 5 else ("🟡" if dif_pct >= 2 else "🎲")
+            st.write(f"{emoji} **{r['hora']}** — 🔥 Cal {r['cal_pct']}% · ❄️ Fríos {r['fri_pct']}% · 🎲 Esp {r['esp_pct']}%")
 
-    st.markdown("## 🎯 VEREDICTO")
-
-    if resultado["frios_reales"] > resultado["calientes_reales"] * 1.15:
-        st.success(f"✅ TU TEORÍA TIENE BASE. Los fríos salieron MÁS ({resultado['frios_reales']}) que los calientes ({resultado['calientes_reales']}).")
-    elif resultado["calientes_reales"] > resultado["frios_reales"] * 1.15:
-        st.warning(f"⚠️ AL REVÉS. Los calientes salieron MÁS ({resultado['calientes_reales']}) que los fríos ({resultado['frios_reales']}).")
+        st.markdown("**Peores horas (donde los calientes explotan):**")
+        for r in res_hora[-3:]:
+            dif_pct = r['fri_pct'] - r['cal_pct']
+            st.write(f"⚠️ **{r['hora']}** — 🔥 Cal {r['cal_pct']}% · ❄️ Fríos {r['fri_pct']}% · 🎲 Esp {r['esp_pct']}%")
     else:
-        st.info(f"🎲 AZAR PURO. Calientes ({resultado['calientes_reales']}) y fríos ({resultado['frios_reales']}) salieron parecido. No hay ventaja.")
+        st.warning("No se pudo analizar por hora.")
 
     st.markdown("---")
-    st.caption(f"Total sorteos analizados: {resultado['total_sorteos']} · Ventana: {resultado['ventana_dias']} días · Top: {resultado['top_n']}")
+
+    # ═══════════════════════════════════════
+    # CONCLUSIÓN
+    # ═══════════════════════════════════════
+    st.markdown("## 🎯 CONCLUSIÓN")
+
+    mejor = max(resultados, key=lambda x: x['fri'] - x['cal']) if resultados else None
+    if mejor:
+        dif = mejor['fri'] - mejor['cal']
+        pct = (dif / mejor['esp']) * 100 if mejor['esp'] > 0 else 0
+        st.markdown(f"**Mejor variante:** {mejor['nombre']}")
+        st.markdown(f"**Diferencia:** fríos salen {pct:+.1f}% vs azar")
+        if pct >= 10:
+            st.success("✅ HAY HUECO — vale la pena investigar más")
+        elif pct >= 5:
+            st.info("🟡 HUECO DÉBIL — puede servir pero con cuidado")
+        else:
+            st.warning("❌ SIN HUECO CLARO — el azar manda")
 
 
 if __name__ == "__main__":
