@@ -4,7 +4,7 @@ import re
 from collections import Counter
 
 st.set_page_config(
-    page_title="Fríos Equilibrados",
+    page_title="Fríos - 4 Variantes",
     page_icon="❄️",
     layout="centered"
 )
@@ -12,7 +12,6 @@ st.set_page_config(
 GOOGLE_SHEET_ID = "1aP-qP6YXz7HcXuy77GXX4xqMKE3-noLP_jvQflqvE-I"
 GOOGLE_SHEET_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv"
 
-DIAS_ENJAULADO_EXCLUIR = 6
 VENTANA_FRIOS = 5
 ANIMALITOS_DICT = {
     0: "Delfín", 1: "Carnero", 2: "Toro", 3: "Ciempiés", 4: "Alacrán",
@@ -77,7 +76,6 @@ def cargar_historial():
 
 
 def dias_sin_salir(df_hasta):
-    """Calcula cuántos días lleva cada animalito sin salir."""
     fechas = sorted(df_hasta["fecha_dt"].dropna().unique())
     if not fechas:
         return {n: 999 for n in ANIMALITOS_DICT.keys()}
@@ -93,29 +91,28 @@ def dias_sin_salir(df_hasta):
     return resultado
 
 
-def get_frios_equilibrados(df_hasta, max_dias_enj=6, ventana_dias=5):
-    """Devuelve los fríos puros, excluyendo enjaulados extremos."""
+def get_frios(df_hasta, excluir_desde=None):
+    """Fríos puros. Si excluir_desde está definido, quita los que llevan >= ese número de días."""
     fechas = sorted(df_hasta["fecha_dt"].dropna().unique())
-    if len(fechas) < ventana_dias:
+    if len(fechas) < VENTANA_FRIOS:
         return []
 
-    fechas_ventana = fechas[-ventana_dias:]
+    fechas_ventana = fechas[-VENTANA_FRIOS:]
     df_vent = df_hasta[df_hasta["fecha_dt"].isin(fechas_ventana)]
     conteo = Counter(df_vent["numero"].tolist())
 
     dias_sin = dias_sin_salir(df_hasta)
 
-    # Excluir enjaulados extremos
-    candidatos = [n for n in ANIMALITOS_DICT.keys() if dias_sin[n] < max_dias_enj]
+    if excluir_desde:
+        candidatos = [n for n in ANIMALITOS_DICT.keys() if dias_sin[n] < excluir_desde]
+    else:
+        candidatos = list(ANIMALITOS_DICT.keys())
 
-    # Ordenar por menos salidas en ventana
     candidatos.sort(key=lambda n: (conteo.get(n, 0), n))
-
     return candidatos
 
 
 def armar_tripletas(frios, max_tripletas=5):
-    """Arma tripletas de 3 animalitos distintos."""
     if len(frios) < 3:
         return []
 
@@ -134,8 +131,7 @@ def armar_tripletas(frios, max_tripletas=5):
     return tripletas
 
 
-def backtest(df, dias_test=30):
-    """Backtest 30 días con Fríos Equilibrados."""
+def backtest(df, excluir_desde=None, dias_test=15):
     fechas = sorted(df["fecha_dt"].dropna().unique())
     if len(fechas) < dias_test + 6:
         dias_test = len(fechas) - 6
@@ -154,7 +150,7 @@ def backtest(df, dias_test=30):
         if df_dia.empty:
             continue
 
-        frios = get_frios_equilibrados(df_hasta)
+        frios = get_frios(df_hasta, excluir_desde=excluir_desde)
         tripletas = armar_tripletas(frios)
 
         if not tripletas:
@@ -162,37 +158,48 @@ def backtest(df, dias_test=30):
 
         nums_dia = set(df_dia["numero"].tolist())
         pego_hoy = False
-        detalle = []
 
-        for i, trip in enumerate(tripletas, 1):
+        for trip in tripletas:
             total_tripletas += 1
             if all(n in nums_dia for n in trip):
                 total_pegadas += 1
                 pego_hoy = True
-                detalle.append({"num": i, "tripleta": trip, "pego": True})
-            else:
-                salieron = sum(1 for n in trip if n in nums_dia)
-                detalle.append({"num": i, "tripleta": trip, "pego": False, "salieron": salieron})
 
-        resultados.append({
-            "fecha": pd.to_datetime(fecha_actual).strftime("%d/%m/%Y"),
-            "pego": pego_hoy,
-            "detalle": detalle,
-            "num_tripletas": len(tripletas)
-        })
+        resultados.append({"fecha": pd.to_datetime(fecha_actual).strftime("%d/%m/%Y"), "pego": pego_hoy, "num_t": len(tripletas)})
 
     return {
         "total_dias": len(resultados),
         "dias_con_tripleta": sum(1 for r in resultados if r["pego"]),
-        "total_tripletas_jugadas": total_tripletas,
         "tripletas_pegadas": total_pegadas,
+        "total_tripletas_jugadas": total_tripletas,
         "resultados": resultados
     }
 
 
+def mostrar_bt(resultado, nombre):
+    st.markdown(f"### {nombre}")
+    col1, col2, col3 = st.columns(3)
+    col1.metric("Días", resultado["total_dias"])
+    col2.metric("Días ✅", resultado["dias_con_tripleta"])
+    col3.metric("Tripletas ✅", resultado["tripletas_pegadas"])
+
+    inversion = resultado["total_dias"] * 500
+    ganancia = resultado["tripletas_pegadas"] * 5000
+    neto = ganancia - inversion
+
+    st.caption(f"Invertido: {inversion:,} · Ganado: {ganancia:,} · **Neto: {neto:+,} Bs**")
+    if neto > 0:
+        st.success(f"✅ GANANCIA: +{neto:,} Bs")
+    elif neto == 0:
+        st.warning("🟡 EMPATE")
+    else:
+        st.error(f"❌ PÉRDIDA: {neto:,} Bs")
+    st.markdown("---")
+
+
 def main():
-    st.title("❄️ FRÍOS EQUILIBRADOS")
-    st.caption("Fríos puros · Sin enjaulados extremos · Tripleta del día")
+    st.title("❄️ FRÍOS — 4 VARIANTES")
+    st.caption("Comparamos: sin excluir · excluye 6+ · excluye 10+ · excluye 15+")
 
     if st.button("🔄 Recargar datos"):
         st.cache_data.clear()
@@ -208,87 +215,76 @@ def main():
     st.caption(f"📊 Data: {len(df)} sorteos · {df['fecha'].nunique()} días")
 
     # ═══════════════════════════════════════
-    # TRIPLETAS PARA HOY
+    # TRIPLETAS PARA HOY — MÉTODO RECOMENDADO (sin excluir)
     # ═══════════════════════════════════════
-    st.markdown("## 🎯 TRIPLETAS PARA HOY")
+    st.markdown("## 🎯 TRIPLETAS PARA HOY (método original)")
 
-    frios = get_frios_equilibrados(df)
+    frios_hoy = get_frios(df, excluir_desde=None)
     dias_sin = dias_sin_salir(df)
 
-    if frios:
-        st.markdown("### ❄️ Fríos disponibles (sin enjaulados 6+ días)")
-
-        # Mostrar los primeros 15 con detalle
-        for n in frios[:15]:
-            dias = dias_sin.get(n, "?")
-            st.write(f"**{fmt_num(n)} {ANIMALITOS_DICT[n]}** — lleva {dias} días sin salir")
+    if frios_hoy:
+        st.markdown("### ❄️ Top 15 fríos disponibles")
+        for n in frios_hoy[:15]:
+            st.write(f"**{fmt_num(n)} {ANIMALITOS_DICT[n]}** — {dias_sin[n]} días sin salir")
 
         st.markdown("---")
-
-        tripletas = armar_tripletas(frios)
+        tripletas = armar_tripletas(frios_hoy)
 
         if tripletas:
-            st.markdown(f"### 🎲 {len(tripletas)} TRIPLETAS PARA JUGAR")
+            st.markdown(f"### 🎲 {len(tripletas)} TRIPLETAS")
             for i, trip in enumerate(tripletas, 1):
                 nombres = " + ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]}" for n in trip])
                 st.markdown(f"**Tripleta #{i}:** {nombres}")
-        else:
-            st.warning("No hay suficientes fríos para armar tripletas.")
-    else:
-        st.warning("No hay fríos disponibles.")
-
     st.markdown("---")
 
     # ═══════════════════════════════════════
-    # BACKTEST 30 DÍAS
+    # BACKTEST 15 DÍAS — 4 VARIANTES
     # ═══════════════════════════════════════
-    st.markdown("## 📊 BACKTEST — ÚLTIMOS 30 DÍAS")
+    st.markdown("## 📊 BACKTEST 15 DÍAS — 4 VARIANTES")
 
-    with st.spinner("Analizando 30 días..."):
-        resultado = backtest(df, dias_test=30)
+    with st.spinner("Analizando variantes (15 días)..."):
+        res_A = backtest(df, excluir_desde=None, dias_test=15)
+        res_B = backtest(df, excluir_desde=6, dias_test=15)
+        res_C = backtest(df, excluir_desde=10, dias_test=15)
+        res_D = backtest(df, excluir_desde=15, dias_test=15)
 
-    if resultado:
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Días", resultado["total_dias"])
-        col2.metric("Días con ✅", resultado["dias_con_tripleta"])
-        col3.metric("Tripletas ✅", resultado["tripletas_pegadas"])
+    mostrar_bt(res_A, "A) Fríos SIN excluir (original)")
+    mostrar_bt(res_B, "B) Fríos excluyendo 6+ días")
+    mostrar_bt(res_C, "C) Fríos excluyendo 10+ días")
+    mostrar_bt(res_D, "D) Fríos excluyendo 15+ días")
 
-        pct = resultado["dias_con_tripleta"] / resultado["total_dias"] * 100 if resultado["total_dias"] > 0 else 0
-        st.markdown(f"**Días con al menos 1 tripleta: {pct:.1f}%**")
+    # ═══════════════════════════════════════
+    # BACKTEST 30 DÍAS — COMPARACIÓN
+    # ═══════════════════════════════════════
+    st.markdown("## 📊 BACKTEST 30 DÍAS — COMPARACIÓN")
 
-        # Rentabilidad (asumiendo 5 tripletas × 100 Bs)
-        st.markdown("### 💰 Rentabilidad estimada")
-        st.caption("Asumiendo 5 tripletas × 100 Bs = 500 Bs/día")
+    with st.spinner("Analizando variantes (30 días)..."):
+        res_A30 = backtest(df, excluir_desde=None, dias_test=30)
+        res_B30 = backtest(df, excluir_desde=6, dias_test=30)
+        res_C30 = backtest(df, excluir_desde=10, dias_test=30)
+        res_D30 = backtest(df, excluir_desde=15, dias_test=30)
 
-        inversion = resultado["total_dias"] * 500
-        ganancia = resultado["tripletas_pegadas"] * 5000
-        neto = ganancia - inversion
+    mostrar_bt(res_A30, "A) Fríos SIN excluir (original)")
+    mostrar_bt(res_B30, "B) Fríos excluyendo 6+ días")
+    mostrar_bt(res_C30, "C) Fríos excluyendo 10+ días")
+    mostrar_bt(res_D30, "D) Fríos excluyendo 15+ días")
 
-        col1, col2, col3 = st.columns(3)
-        col1.metric("Invertido", f"{inversion:,}")
-        col2.metric("Ganado", f"{ganancia:,}")
-        col3.metric("Neto", f"{neto:+,}")
+    # ═══════════════════════════════════════
+    # VEREDICTO
+    # ═══════════════════════════════════════
+    st.markdown("## 🏆 VEREDICTO")
 
-        if neto > 0:
-            st.success(f"✅ GANANCIA: +{neto:,} Bs en 30 días")
-        elif neto == 0:
-            st.warning("🟡 EMPATE técnico")
-        else:
-            st.error(f"❌ PÉRDIDA: {neto:,} Bs en 30 días")
+    variantes_15 = {"A) Sin excluir": res_A, "B) Excluye 6+": res_B, "C) Excluye 10+": res_C, "D) Excluye 15+": res_D}
+    variantes_30 = {"A) Sin excluir": res_A30, "B) Excluye 6+": res_B30, "C) Excluye 10+": res_C30, "D) Excluye 15+": res_D30}
 
-        with st.expander("Ver detalle día por día"):
-            for r in resultado["resultados"]:
-                emoji = "✅" if r["pego"] else "❌"
-                st.write(f"{emoji} **{r['fecha']}** — {r['num_tripletas']} tripletas")
-                for d in r["detalle"]:
-                    nombres = " + ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]}" for n in d["tripleta"]])
-                    if d["pego"]:
-                        st.write(f"   ✅ T#{d['num']}: {nombres}")
-                    else:
-                        st.write(f"   ❌ T#{d['num']}: {nombres} ({d.get('salieron', 0)}/3)")
+    mejor_15 = max(variantes_15.items(), key=lambda x: x[1]["tripletas_pegadas"])
+    mejor_30 = max(variantes_30.items(), key=lambda x: x[1]["tripletas_pegadas"])
+
+    st.markdown(f"**Mejor en 15 días:** {mejor_15[0]} con {mejor_15[1]['tripletas_pegadas']} tripletas")
+    st.markdown(f"**Mejor en 30 días:** {mejor_30[0]} con {mejor_30[1]['tripletas_pegadas']} tripletas")
 
     st.markdown("---")
-    st.caption(f"Regla: se excluyen los que llevan {DIAS_ENJAULADO_EXCLUIR}+ días sin salir")
+    st.caption("Invertido: 500 Bs/día (5 tripletas × 100 Bs) · Ganado: 5.000 Bs por tripleta pegada")
 
 
 if __name__ == "__main__":
