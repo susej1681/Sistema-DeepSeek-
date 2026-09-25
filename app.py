@@ -61,12 +61,13 @@ def cargar_historial():
                     val = str(df_raw.iloc[fd, col]).strip()
                     if not val or val.lower() == "nan" or val.lower() == "hora":
                         continue
+                    hora_val = str(df_raw.iloc[fd, 0]).strip()
                     m = re.search(r'\((\d+)\)', val)
                     if m:
                         ns = m.group(1)
                         num = 100 if ns == "00" else int(ns)
                         nombre = ANIMALITOS_DICT.get(num, re.sub(r'\s*\(\d+\)', '', val).strip())
-                        registros.append({"fecha": fecha, "numero": num, "nombre": nombre})
+                        registros.append({"fecha": fecha, "hora": hora_val, "numero": num, "nombre": nombre})
         df = pd.DataFrame(registros)
         if not df.empty:
             df["fecha_dt"] = pd.to_datetime(df["fecha"], format="%d/%m/%Y", errors="coerce")
@@ -74,7 +75,7 @@ def cargar_historial():
         return df
     except Exception as e:
         st.error(f"Error: {e}")
-        return pd.DataFrame(columns=["fecha", "numero", "nombre"])
+        return pd.DataFrame(columns=["fecha", "hora", "numero", "nombre"])
 
 
 def dias_sin_salir(df_hasta):
@@ -94,7 +95,6 @@ def dias_sin_salir(df_hasta):
 
 
 def get_frios_metodo_c(df_hasta):
-    """Método C: fríos EXCLUYENDO los que llevan 10+ días sin salir."""
     fechas = sorted(df_hasta["fecha_dt"].dropna().unique())
     if len(fechas) < VENTANA_FRIOS:
         return [], {}
@@ -137,7 +137,6 @@ def backtest(df, dias_test=30):
 
     fechas_test = fechas[-dias_test:]
     resultados = []
-    total_tripletas = 0
     total_pegadas = 0
 
     for fecha_actual in fechas_test:
@@ -160,7 +159,6 @@ def backtest(df, dias_test=30):
         detalle = []
 
         for i, trip in enumerate(tripletas, 1):
-            total_tripletas += 1
             if all(n in nums_dia for n in trip):
                 total_pegadas += 1
                 pego_hoy = True
@@ -195,15 +193,29 @@ def main():
         df = cargar_historial()
 
     if df.empty:
-        st.error("Sin datos.")
+        st.error("No se pudieron cargar datos.")
         return
 
-    st.caption(f"📊 Data: {len(df)} sorteos · {df['fecha'].nunique()} días")
+    # ═══════════════════════════════════════
+    # ÚLTIMO RESULTADO
+    # ═══════════════════════════════════════
+    ultimo = df.iloc[-1]
+    st.markdown("## 🎯 ÚLTIMO RESULTADO")
+    st.markdown(f"# {fmt_num(int(ultimo['numero']))} - {ultimo['nombre']}")
+    hora_txt = ultimo.get('hora', '?') if 'hora' in df.columns else '?'
+    st.caption(f"📅 Fecha: {ultimo['fecha']} · 🕐 Hora: {hora_txt}")
+
+    # Contador de datos
+    total_sorteos = len(df)
+    total_dias = df["fecha"].nunique()
+    st.info(f"📊 **Data cargada:** {total_sorteos} sorteos · {total_dias} días · Última actualización: {ultimo['fecha']}")
+
+    st.markdown("---")
 
     # ═══════════════════════════════════════
     # TRIPLETAS PARA HOY
     # ═══════════════════════════════════════
-    st.markdown("## 🎯 TRIPLETAS PARA HOY")
+    st.markdown("## 🎲 TRIPLETAS PARA HOY")
 
     frios, dias_sin = get_frios_metodo_c(df)
 
@@ -217,7 +229,7 @@ def main():
         tripletas = armar_tripletas(frios)
 
         if tripletas:
-            st.markdown(f"### 🎲 {len(tripletas)} TRIPLETAS PARA JUGAR")
+            st.markdown(f"### 🎯 {len(tripletas)} TRIPLETAS PARA JUGAR")
             for i, trip in enumerate(tripletas, 1):
                 nombres = " + ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]}" for n in trip])
                 st.markdown(f"**Tripleta #{i}:** {nombres}")
