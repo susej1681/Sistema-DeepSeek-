@@ -4,7 +4,7 @@ import re
 from collections import Counter
 
 st.set_page_config(
-    page_title="Fríos Dinámico",
+    page_title="Fríos Método C",
     page_icon="❄️",
     layout="centered"
 )
@@ -13,6 +13,7 @@ GOOGLE_SHEET_ID = "1aP-qP6YXz7HcXuy77GXX4xqMKE3-noLP_jvQflqvE-I"
 GOOGLE_SHEET_URL = f"https://docs.google.com/spreadsheets/d/{GOOGLE_SHEET_ID}/export?format=csv"
 
 VENTANA_FRIOS = 5
+EXCLUIR_DESDE = 10
 
 ANIMALITOS_DICT = {
     0: "Delfín", 1: "Carnero", 2: "Toro", 3: "Ciempiés", 4: "Alacrán",
@@ -92,59 +93,26 @@ def dias_sin_salir(df_hasta):
     return resultado
 
 
-def corte_dinamico(df_hasta):
-    """El corte se adapta según cuántos enjaulados (6+) haya."""
-    dias_sin = dias_sin_salir(df_hasta)
-    enjaulados_6 = sum(1 for n in ANIMALITOS_DICT.keys() if dias_sin[n] >= 6)
-    if enjaulados_6 <= 5:
-        return 6
-    elif enjaulados_6 <= 10:
-        return 8
-    else:
-        return 10
-
-
-def get_pool(df_hasta):
-    """Pool mixto: 70% fríos puros + 30% enjaulados selectivos."""
+def get_frios_metodo_c(df_hasta):
+    """Método C: fríos EXCLUYENDO los que llevan 10+ días sin salir."""
     fechas = sorted(df_hasta["fecha_dt"].dropna().unique())
     if len(fechas) < VENTANA_FRIOS:
-        return [], {}, 10
+        return [], {}
 
-    corte = corte_dinamico(df_hasta)
     fechas_ventana = fechas[-VENTANA_FRIOS:]
     df_vent = df_hasta[df_hasta["fecha_dt"].isin(fechas_ventana)]
     conteo = Counter(df_vent["numero"].tolist())
+
     dias_sin = dias_sin_salir(df_hasta)
 
-    # Pool inicial: todos EXCEPTO los que llevan corte+ días
-    candidatos = [n for n in ANIMALITOS_DICT.keys() if dias_sin[n] < corte]
+    candidatos = [n for n in ANIMALITOS_DICT.keys() if dias_sin[n] < EXCLUIR_DESDE]
+    candidatos.sort(key=lambda n: (conteo.get(n, 0), n))
 
-    # Ordenar por menos salidas (más fríos primero)
-    candidatos.sort(key=lambda n: (conteo.get(n, 0), -dias_sin[n]))
-
-    # Separar en 2 grupos:
-    # - Fríos puros (1-5 días sin salir) → prioridad
-    # - Enjaulados selectivos (6-9 días) → secundarios
-    frios_puros = [n for n in candidatos if dias_sin[n] < 6]
-    enj_selectivos = [n for n in candidatos if 6 <= dias_sin[n] < 10]
-
-    # 70% fríos + 30% enjaulados (hasta 10 total)
-    total = 10
-    n_frios = max(7, int(total * 0.7))
-    n_enj = total - n_frios
-
-    pool = frios_puros[:n_frios] + enj_selectivos[:n_enj]
-
-    # Si no hay suficientes enjaulados, completar con más fríos
-    if len(pool) < total:
-        extras = [n for n in frios_puros if n not in pool]
-        pool.extend(extras[:total - len(pool)])
-
-    return pool, dias_sin, corte
+    return candidatos, dias_sin
 
 
-def armar_tripletas(pool, max_tripletas=5):
-    if len(pool) < 3:
+def armar_tripletas(frios, max_tripletas=5):
+    if len(frios) < 3:
         return []
 
     combinaciones = [
@@ -157,8 +125,8 @@ def armar_tripletas(pool, max_tripletas=5):
 
     tripletas = []
     for c in combinaciones[:max_tripletas]:
-        if all(i < len(pool) for i in c):
-            tripletas.append([pool[i] for i in c])
+        if all(i < len(frios) for i in c):
+            tripletas.append([frios[i] for i in c])
     return tripletas
 
 
@@ -169,6 +137,7 @@ def backtest(df, dias_test=30):
 
     fechas_test = fechas[-dias_test:]
     resultados = []
+    total_tripletas = 0
     total_pegadas = 0
 
     for fecha_actual in fechas_test:
@@ -180,8 +149,8 @@ def backtest(df, dias_test=30):
         if df_dia.empty:
             continue
 
-        pool, _, corte = get_pool(df_hasta)
-        tripletas = armar_tripletas(pool)
+        frios, _ = get_frios_metodo_c(df_hasta)
+        tripletas = armar_tripletas(frios)
 
         if not tripletas:
             continue
@@ -191,6 +160,7 @@ def backtest(df, dias_test=30):
         detalle = []
 
         for i, trip in enumerate(tripletas, 1):
+            total_tripletas += 1
             if all(n in nums_dia for n in trip):
                 total_pegadas += 1
                 pego_hoy = True
@@ -202,8 +172,6 @@ def backtest(df, dias_test=30):
         resultados.append({
             "fecha": pd.to_datetime(fecha_actual).strftime("%d/%m/%Y"),
             "pego": pego_hoy,
-            "corte": corte,
-            "pool_size": len(pool),
             "detalle": detalle
         })
 
@@ -216,8 +184,8 @@ def backtest(df, dias_test=30):
 
 
 def main():
-    st.title("❄️ FRÍOS DINÁMICO")
-    st.caption("Corte dinámico · Pool mixto 70/30 · Fríos + Enjaulados selectivos")
+    st.title("❄️ FRÍOS MÉTODO C")
+    st.caption("Excluye los 10+ días sin salir · Tripletas del día")
 
     if st.button("🔄 Recargar datos"):
         st.cache_data.clear()
@@ -237,27 +205,27 @@ def main():
     # ═══════════════════════════════════════
     st.markdown("## 🎯 TRIPLETAS PARA HOY")
 
-    pool, dias_sin, corte = get_pool(df)
+    frios, dias_sin = get_frios_metodo_c(df)
 
-    st.markdown(f"**Corte aplicado hoy:** excluir los de **{corte}+ días** sin salir")
-    st.markdown(f"**Pool disponible:** {len(pool)} animalitos")
-    st.markdown("---")
-
-    if pool:
-        st.markdown("### ❄️ Animalitos del pool")
-        for n in pool:
-            dias = dias_sin[n]
-            tipo = "❄️ frío" if dias < 6 else "🔒 enjaulado selectivo"
-            st.write(f"**{fmt_num(n)} {ANIMALITOS_DICT[n]}** — {dias} días sin salir · {tipo}")
+    if frios:
+        st.markdown("### ❄️ Fríos disponibles (sin excluir 10+ días)")
+        for n in frios[:15]:
+            st.write(f"**{fmt_num(n)} {ANIMALITOS_DICT[n]}** — {dias_sin[n]} días sin salir")
 
         st.markdown("---")
 
-        tripletas = armar_tripletas(pool)
+        tripletas = armar_tripletas(frios)
+
         if tripletas:
             st.markdown(f"### 🎲 {len(tripletas)} TRIPLETAS PARA JUGAR")
             for i, trip in enumerate(tripletas, 1):
                 nombres = " + ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]}" for n in trip])
                 st.markdown(f"**Tripleta #{i}:** {nombres}")
+        else:
+            st.warning("No hay suficientes fríos.")
+    else:
+        st.warning("No hay fríos disponibles.")
+
     st.markdown("---")
 
     # ═══════════════════════════════════════
@@ -294,19 +262,10 @@ def main():
         else:
             st.error(f"❌ PÉRDIDA: {neto:,} Bs")
 
-        # Comparar con Método C original (+30.000)
-        st.markdown(f"**Comparación con Método C original:** +30.000 Bs")
-        if neto > 30000:
-            st.success("🔥 ¡MEJORA sobre el Método C!")
-        elif neto == 30000:
-            st.info("🤝 Igual que el Método C")
-        else:
-            st.warning("⚠️ Por debajo del Método C")
-
         with st.expander("Ver detalle día por día"):
             for r in resultado["resultados"]:
                 emoji = "✅" if r["pego"] else "❌"
-                st.write(f"{emoji} **{r['fecha']}** · Corte {r['corte']} · Pool {r['pool_size']}")
+                st.write(f"{emoji} **{r['fecha']}**")
                 for d in r["detalle"]:
                     nombres = " + ".join([f"{fmt_num(n)} {ANIMALITOS_DICT[n]}" for n in d["tripleta"]])
                     if d["pego"]:
@@ -315,7 +274,7 @@ def main():
                         st.write(f"   ❌ T#{d['num']}: {nombres} ({d.get('salieron', 0)}/3)")
 
     st.markdown("---")
-    st.caption("Corte dinámico: ≤5 enj → 6 · 6-10 enj → 8 · >10 enj → 10 · Pool: 70% fríos + 30% selectivos")
+    st.caption(f"Regla: se excluyen los que llevan {EXCLUIR_DESDE}+ días sin salir · Ventana fríos: {VENTANA_FRIOS} días")
 
 
 if __name__ == "__main__":
